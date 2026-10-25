@@ -10,5 +10,6 @@ Analyst view: what underperforming hosts can change to earn more. Quarto (R) for
 ## Render
 
 Requires R with tidyverse, ggrepel, scales, sf, patchwork and ggridges, plus Quarto.
+The .qmd files read the data directly from this repo on GitHub, so no local download is needed.
 Run `quarto render story4_report.qmd` and `quarto render story4_slides.qmd`.
 For the slide PDF, open `story4_slides.html?print-pdf` in Chrome and print to PDF.

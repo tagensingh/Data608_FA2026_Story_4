@@ -27,7 +27,8 @@ library(sf)
 library(patchwork)
 library(ggridges)
 
-data_url <- "data/"
+# Data is stored in this project's GitHub repo (data/ folder)
+data_url <- "https://raw.githubusercontent.com/tagensingh/Data608_FA2026_Story_4/main/data/"
 
 # Okabe-Ito (colorblind-safe) colors; one accent plus grey for highlighting
 oi <- c(orange = "#E69F00", sky = "#56B4E9", green = "#009E73",
