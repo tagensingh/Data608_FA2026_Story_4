@@ -1,0 +1,374 @@
+---
+title: "Story 4: What Separates Profitable NYC Airbnbs from the Rest?"
+subtitle: "DATA 608 · Fall 2026 · Analyst view: helping hosts earn more"
+author: "Tage Singh"
+date: today
+format:
+  typst:
+    papersize: us-letter
+    margin:
+      x: 0.8in
+      y: 0.7in
+    fig-width: 8
+    fig-height: 5
+    fig-dpi: 300
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(ggrepel)
+library(scales)
+library(sf)
+library(patchwork)
+library(ggridges)
+
+data_url <- "data/"
+
+# Okabe-Ito (colorblind-safe) colors; one accent plus grey for highlighting
+oi <- c(orange = "#E69F00", sky = "#56B4E9", green = "#009E73",
+        blue = "#0072B2", vermillion = "#D55E00", purple = "#CC79A7")
+accent <- oi[["vermillion"]]
+muted  <- "grey65"
+
+theme_story <- theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold", size = 15),
+        plot.subtitle = element_text(color = "grey30", size = 11,
+                                     margin = margin(b = 8)),
+        plot.caption = element_text(color = "grey45", size = 8.5, hjust = 0),
+        plot.title.position = "plot",
+        plot.caption.position = "plot",
+        panel.grid.minor = element_blank(),
+        legend.position = "top",
+        legend.justification = "left")
+theme_set(theme_story)
+
+# ---- Data ----
+raw <- read_csv(paste0(data_url, "nyc_airbnb_listings.csv"),
+                show_col_types = FALSE, guess_max = 1e5)
+
+# Like-for-like comparisons: drop extreme prices (> $1,000/night) and the
+# small shared-room segment; compare each listing with its peers
+# (same neighborhood, room type and stay length)
+listings <- raw |>
+  filter(price <= 1000, room_type != "Shared room") |>
+  mutate(room = if_else(room_type == "Entire home/apt", "Entire home", "Private room"),
+         stay = if_else(minimum_nights >= 30, "30+ night stays", "Short stays"),
+         segment = paste(room, stay, sep = ", "),
+         dormant = is.na(host_response_time) | number_of_reviews_ltm == 0) |>
+  group_by(neighborhood, room_type, stay) |>
+  mutate(peer_n = n(), peer_rev = median(revenue), peer_price = median(price)) |>
+  ungroup() |>
+  mutate(rev_index = revenue / peer_rev,
+         price_pos = cut(price / peer_price, c(0, 0.8, 0.95, 1.05, 1.25, Inf),
+                         labels = c("20%+ below", "5-20% below", "At peer\nmedian",
+                                    "5-25% above", "25%+ above")))
+
+peers <- listings |> filter(peer_n >= 15)
+
+active <- peers |>
+  filter(!dormant) |>
+  mutate(habits = (host_is_superhost %in% TRUE) +
+           (host_response_time %in% c("within an hour", "within a few hours")) +
+           (review_scores_rating >= 4.8))
+
+n_dropped <- nrow(raw) - nrow(listings)
+share_30  <- mean(listings$stay == "30+ night stays")
+```
+
+**Question:** Two listings in the same neighborhood, with the same room type, can earn very different amounts. What separates the high earners from the rest, and what can an underperforming host change?
+
+**Short answer:** The biggest losses come from listings that have gone quiet. Among active listings, three host habits (superhost status, replying within hours, and ratings of 4.8 or higher) move a listing from below its peers to well above them. Pricing above peers works for entire homes but not for private rooms.
+
+Every comparison is made within a peer group: the same neighborhood, room type and stay length. `r percent(share_30, 1)` of listings require stays of 30 nights or more, in line with New York City's short-term rental rules, so those are compared separately from short stays.
+
+```{r}
+#| label: fig-gap
+#| fig-height: 6
+typical_ratio <- peers |>
+  group_by(neighborhood, room_type, stay) |>
+  summarise(r = quantile(revenue, .75) / pmax(quantile(revenue, .25), 1),
+            .groups = "drop") |>
+  pull(r) |> median()
+
+big10 <- peers |> count(neighborhood, room, stay) |> slice_max(n, n = 10)
+
+ridge_df <- peers |>
+  semi_join(big10, by = c("neighborhood", "room", "stay")) |>
+  mutate(label = paste0(neighborhood, ", ", str_to_lower(room)),
+         rev_plot = pmax(revenue, 1),          # log axis: show $0 nights at the $1 floor
+         label = fct_reorder(label, revenue, .fun = median))
+
+ridge_gap <- ridge_df |>
+  group_by(label) |>
+  summarise(q25 = quantile(revenue, .25), q75 = quantile(revenue, .75),
+            ratio = q75 / q25)
+
+ggplot(ridge_df, aes(rev_plot, label)) +
+  stat_density_ridges(aes(fill = after_stat(factor(quantile))),
+                      geom = "density_ridges_gradient", calc_ecdf = TRUE,
+                      quantiles = c(0.25, 0.75), quantile_lines = TRUE,
+                      bandwidth = 0.07, scale = 1.6, rel_min_height = 0,
+                      color = "white", linewidth = 0.4) +
+  geom_label(data = ridge_gap,
+             aes(x = 1000, y = label, label = paste0(number(ratio, 0.1), "×")),
+             nudge_y = 0.35, hjust = 1, fontface = "bold", size = 3.8,
+             color = "grey20", fill = "white", label.size = 0) +
+  annotate("text", x = 1000, y = 11.3, label = "Top ÷ bottom", hjust = 1,
+           size = 3, color = "grey40") +
+  annotate("text", x = 1.15, y = 0.55, hjust = 0, vjust = 1, size = 3.2, color = "grey30",
+           label = "Long left tails = listings that are rarely booked (see next figure)") +
+  scale_fill_manual(values = c("grey45", "grey85", accent),
+                    labels = c("Bottom quarter", "Middle half", "Top quarter"),
+                    name = NULL) +
+  scale_x_log10(labels = label_dollar(accuracy = 1), breaks = c(1, 3, 10, 30, 100, 300),
+                expand = expansion(mult = c(0, 0.02))) +
+  coord_cartesian(xlim = c(1, 1000), ylim = c(0.6, NA), clip = "off") +
+  labs(title = paste0("Similar listings earn very different amounts: the top quarter\n",
+                      "makes about ", number(typical_ratio, 0.1), " times the bottom quarter"),
+       subtitle = paste0("Distribution of revenue per night (price x occupancy) in the ten largest peer groups,\n",
+                         "all 30+ night stays. Right column: top-quarter cutoff divided by bottom-quarter cutoff."),
+       x = "Revenue per night (log scale)", y = NULL,
+       caption = paste0("Peer group = same neighborhood, room type and stay length. Title ratio = median across all peer groups with 15+ listings.\n",
+                        "Listings with no booked nights are shown at $1. ", n_dropped,
+                        " listings priced above $1,000/night or in shared rooms excluded.\n",
+                        "Source: Inside Airbnb NYC listings (course dataset).")) +
+  theme(panel.grid.major.y = element_blank(), legend.key.size = unit(0.4, "cm"))
+```
+
+{{< pagebreak >}}
+
+The first place to look is listings that are not really in business.
+
+```{r}
+#| label: fig-dormant
+#| fig-height: 5.6
+dorm_stats <- listings |>
+  group_by(dormant) |>
+  summarise(n = n(), occ = median(occupancy))
+
+dorm_plot <- listings |>
+  mutate(group = if_else(dormant,
+                         paste0("Dormant: ", comma(sum(dormant)), " listings"),
+                         paste0("Active: ", comma(sum(!dormant)), " listings")),
+         group = fct_rev(group))
+dorm_lab <- dorm_plot |>
+  group_by(group, dormant) |>
+  summarise(occ = median(occupancy), .groups = "drop")
+
+ggplot(dorm_plot, aes(occupancy, fill = dormant)) +
+  geom_histogram(aes(y = after_stat(density) * 0.05), binwidth = 0.05,
+                 boundary = 0, color = "white") +
+  geom_vline(data = dorm_lab, aes(xintercept = occ), linetype = "dashed",
+             color = "grey25", linewidth = 0.5) +
+  geom_label(data = dorm_lab, aes(x = occ, y = 0.27,
+                                  label = paste0("Median ", percent(occ, 1))),
+             hjust = -0.05, size = 3.6, fontface = "bold", label.size = 0,
+             fill = "white", color = "grey20") +
+  facet_wrap(~group, ncol = 1) +
+  scale_fill_manual(values = c(`FALSE` = muted, `TRUE` = accent), guide = "none") +
+  scale_x_continuous(labels = label_percent()) +
+  scale_y_continuous(labels = label_percent(), breaks = c(0, 0.1, 0.2, 0.3)) +
+  labs(title = "One in four listings is effectively dormant and sits empty most of the year",
+       subtitle = "Share of listings at each occupancy level (share of nights booked over the past year)",
+       x = "Occupancy", y = "Share of listings in group",
+       caption = paste0("Dormant = no host response time on record or no reviews in the last 12 months.\n",
+                        "Occupancy is modeled from monthly calendar scrapes and is approximate. ",
+                        "Source: Inside Airbnb NYC listings (course dataset).")) +
+  theme(panel.grid.major.x = element_blank(),
+        strip.text = element_text(face = "bold", size = 12, hjust = 0))
+```
+
+{{< pagebreak >}}
+
+Dormant listings are not spread evenly, which tells an outreach team where to start.
+
+```{r}
+#| label: fig-map
+#| fig-height: 6
+nyc <- read_sf(paste0(data_url, "neighborhoods.geojson"))
+
+nb <- listings |>
+  group_by(neighborhood, borough) |>
+  summarise(n = n(), dormant_share = mean(dormant), .groups = "drop") |>
+  filter(n >= 20)
+
+nyc_nb <- nyc |> left_join(nb, by = c("neighborhood", "borough"))
+
+top10 <- nb |> slice_max(dormant_share, n = 10) |>
+  mutate(label = paste0(neighborhood, " (", borough, ")"),
+         label = fct_reorder(label, dormant_share))
+
+p_map <- ggplot(nyc_nb) +
+  geom_sf(aes(fill = dormant_share), color = "white", linewidth = 0.1) +
+  scale_fill_viridis_c(option = "rocket", direction = -1, end = 0.9,
+                       labels = label_percent(), na.value = "grey92",
+                       name = "Share of listings dormant") +
+  theme_void(base_size = 11) +
+  theme(legend.position = "top", legend.key.width = unit(1.2, "cm"),
+        legend.key.height = unit(0.3, "cm")) +
+  guides(fill = guide_colorbar(title.position = "top"))
+
+p_dots <- ggplot(top10, aes(dormant_share, label)) +
+  geom_segment(aes(x = 0, xend = dormant_share, yend = label), color = "grey85") +
+  geom_point(color = accent, size = 3) +
+  geom_text(data = filter(top10, neighborhood %in% c("Murray Hill", "Clinton Hill")),
+            aes(label = "exception: busy area"), nudge_x = 0.025, hjust = 0,
+            size = 2.8, color = "grey40", fontface = "italic") +
+  geom_vline(xintercept = mean(listings$dormant), linetype = "dashed", color = "grey50") +
+  annotate("text", x = mean(listings$dormant) + 0.01, y = 0.6, hjust = 0,
+           label = "NYC average", size = 3, color = "grey40") +
+  scale_x_continuous(labels = label_percent(), limits = c(0, 0.7), breaks = seq(0, 0.6, 0.2)) +
+  labs(x = "Share dormant", y = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid.major.y = element_blank(), panel.grid.minor = element_blank())
+
+(p_map | p_dots) +
+  plot_layout(widths = c(1.15, 1)) +
+  plot_annotation(
+    title = "Dormant listings cluster in outer Queens, south Brooklyn and upper Manhattan",
+    subtitle = "Share of listings that are dormant, by neighborhood (neighborhoods with 20+ listings)",
+    caption = paste0("Grey = fewer than 20 listings. Small neighborhoods have noisy shares; the ten highest are listed at right.\n",
+                     "Source: Inside Airbnb NYC listings and neighborhood boundaries (course dataset)."),
+    theme = theme_story)
+```
+
+{{< pagebreak >}}
+
+Once a listing is active, three habits a host controls separate the high earners from the rest.
+
+```{r}
+#| label: fig-habits
+#| fig-height: 5.4
+habit_all <- active |>
+  group_by(habits) |>
+  summarise(idx = median(rev_index), rev = median(revenue), n = n())
+
+habit_seg <- active |>
+  filter(!(stay == "Short stays" & habits == 0)) |>   # too few listings
+  group_by(segment, habits) |>
+  summarise(idx = median(rev_index), n = n(), .groups = "drop")
+
+seg_ends <- habit_seg |> filter(habits == 3)
+
+ggplot() +
+  geom_hline(yintercept = 1, color = "grey50", linewidth = 0.5) +
+  annotate("text", x = -0.15, y = 1.015, label = "Peer median = 1.0x", hjust = 0,
+           vjust = 0, color = "grey40", size = 3.2) +
+  geom_line(data = habit_seg, aes(habits, idx, group = segment),
+            color = "grey75", linewidth = 0.7) +
+  geom_text(data = seg_ends |> slice_max(idx, n = 1),
+            aes(3.08, idx, label = paste0(segment, ":\nstrongest effect")),
+            color = "grey45", size = 3, hjust = 0, lineheight = 0.9) +
+  geom_line(data = habit_all, aes(habits, idx), color = accent, linewidth = 1.6) +
+  geom_point(data = habit_all, aes(habits, idx), color = accent, size = 3.5) +
+  geom_text(data = habit_all, aes(habits, idx, label = dollar(rev, accuracy = 1)),
+            color = accent, fontface = "bold", size = 3.6, vjust = -1.1) +
+  annotate("text", x = 0.05, y = 1.38, hjust = 0, color = accent,
+           fontface = "bold", size = 3.6,
+           label = "All active listings\n(labels: median revenue per night)") +
+  scale_x_continuous(breaks = 0:3, limits = c(-0.15, 4.3),
+                     labels = c("None", "1 habit", "2 habits", "All 3")) +
+  scale_y_continuous(labels = \(x) paste0(number(x, 0.1), "x"),
+                     limits = c(0.65, 1.5)) +
+  labs(title = "Each host habit adds revenue; hosts with all three earn about 20% above peers",
+       subtitle = "Median revenue vs. the listing's peer group, by number of habits: superhost status,\nreplies within a few hours, guest rating of 4.8 or higher",
+       x = NULL, y = "Revenue vs. peer median",
+       caption = paste0("Active listings in peer groups with 15+ listings. Grey lines = the four room type and stay length segments.\n",
+                        "Source: Inside Airbnb NYC listings (course dataset).")) +
+  theme(panel.grid.major.x = element_blank())
+```
+
+{{< pagebreak >}}
+
+Price is the other lever, and it works differently for whole homes and single rooms.
+
+```{r}
+#| label: fig-price
+#| fig-height: 5.2
+price_eff <- peers |>
+  group_by(room, price_pos) |>
+  summarise(occ = median(occupancy), idx = median(rev_index), n = n(),
+            .groups = "drop")
+
+ends <- price_eff |> filter(price_pos == "25%+ above")
+room_cols <- c("Entire home" = oi[["blue"]], "Private room" = oi[["orange"]])
+
+ggplot(price_eff, aes(price_pos, occ, color = room, group = room)) +
+  geom_line(linewidth = 1.3) +
+  geom_point(aes(shape = room), size = 3.4) +
+  geom_text(data = ends, aes(label = paste0(room, "\nrevenue ", number(idx, 0.01), "x peers")),
+            hjust = 0, nudge_x = 0.12, fontface = "bold", size = 3.4,
+            lineheight = 0.95, show.legend = FALSE) +
+  scale_color_manual(values = room_cols, guide = "none") +
+  scale_shape_manual(values = c(16, 17), guide = "none") +
+  scale_y_continuous(labels = label_percent(), limits = c(0, 0.85)) +
+  scale_x_discrete(expand = expansion(add = c(0.4, 2.2))) +
+  labs(title = "Overpriced private rooms sit empty; entire homes can charge more",
+       subtitle = "Median occupancy by price relative to the peer-group median price",
+       x = "Price vs. peers", y = "Occupancy",
+       caption = paste0("Peer groups with 15+ listings. Labels at right: median revenue vs. peers for listings priced 25%+ above peers.\n",
+                        "Source: Inside Airbnb NYC listings (course dataset).")) +
+  theme(panel.grid.major.x = element_blank())
+```
+
+{{< pagebreak >}}
+
+Putting it together: the three levers, ranked by how many listings they reach and how much revenue is at stake.
+
+```{r}
+#| label: fig-actions
+#| fig-height: 4.6
+dormant_n <- sum(listings$dormant)
+gain_0_3 <- habit_all$rev[habit_all$habits == 3] - habit_all$rev[habit_all$habits == 0]
+priv_hi  <- price_eff |> filter(room == "Private room", price_pos == "25%+ above")
+priv_mid <- price_eff |> filter(room == "Private room", price_pos == "At peer\nmedian")
+
+actions <- tibble(
+  step = factor(1:3),
+  action = c("Reactivate dormant listings",
+             "Build the three host habits",
+             "Price private rooms near peers"),
+  who = c(paste0(comma(dormant_n), " listings with no recent reviews or replies"),
+          "Active hosts with none or one of the habits",
+          "Private rooms priced 25%+ above their peers"),
+  metric = c(paste0("Occupancy ", percent(dorm_stats$occ[dorm_stats$dormant], 1),
+                    " to ", percent(dorm_stats$occ[!dorm_stats$dormant], 1), " (active median)"),
+             paste0("Revenue/night ", dollar(habit_all$rev[habit_all$habits == 0], 1),
+                    " to ", dollar(habit_all$rev[habit_all$habits == 3], 1), " (+",
+                    dollar(gain_0_3, 1), ")"),
+             paste0("Occupancy ", percent(priv_hi$occ, 1), " to ",
+                    percent(priv_mid$occ, 1), " at peer price"))
+)
+
+ggplot(actions, aes(y = fct_rev(step))) +
+  geom_tile(aes(x = 0.5, width = 1, height = 0.86), fill = "grey96") +
+  geom_tile(aes(x = 0.012, width = 0.024, height = 0.86), fill = accent) +
+  geom_text(aes(x = 0.05, label = action), hjust = 0, vjust = -0.45,
+            fontface = "bold", size = 5) +
+  geom_text(aes(x = 0.05, label = who), hjust = 0, vjust = 1.25,
+            color = "grey35", size = 3.6) +
+  geom_text(aes(x = 0.97, label = metric), hjust = 1, color = accent,
+            fontface = "bold", size = 3.9) +
+  scale_x_continuous(limits = c(0, 1), expand = c(0, 0)) +
+  labs(title = "Three actions for underperforming hosts, in order of impact",
+       subtitle = "What the data shows for listings that already do each one",
+       caption = paste0("Comparisons are medians for similar listings, not guaranteed results; ",
+                        "occupancy is modeled. Source: Inside Airbnb NYC listings (course dataset).")) +
+  theme_void(base_size = 13) +
+  theme(plot.title = element_text(face = "bold", size = 15),
+        plot.subtitle = element_text(color = "grey30", size = 11, margin = margin(b = 8)),
+        plot.caption = element_text(color = "grey45", size = 8.5, hjust = 0),
+        plot.title.position = "plot", plot.caption.position = "plot",
+        plot.margin = margin(10, 10, 10, 10))
+```
+
+**Limitations**
+
+- Occupancy is modeled from calendar scrapes, not booking records, so revenue is an estimate.
+- These are associations, not proven causes. Busy listings may earn superhost status and good ratings because they are booked often, not only the other way around.
+- Superhost status and ratings take time to earn; the fastest lever is response time.
